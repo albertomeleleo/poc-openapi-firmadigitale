@@ -1,0 +1,16 @@
+# Mock Profile Configuration
+# This profile uses MockOpenApiFirmaClient instead of real API calls
+
+spring:
+  application:
+    name: firma-backend-mock
+
+logging:
+  level:
+    com.openapi.firma.client.MockOpenApiFirmaClient: DEBUG
+
+# Mock specific settings
+mock:
+  enabled: true
+  auto-complete-signatures: true
+  delay-ms: 500
