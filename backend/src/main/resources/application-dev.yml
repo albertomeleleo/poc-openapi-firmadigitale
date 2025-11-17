@@ -2,7 +2,10 @@
 spring:
   application:
     name: firma-backend-dev
-
+  servlet:
+    multipart:
+      max-file-size: 150MB
+      max-request-size: 150MB
   datasource:
     url: ${SPRING_DATASOURCE_URL:jdbc:h2:mem:firmadb}
     driver-class-name: org.h2.Driver

@@ -4,13 +4,16 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.openapi.firma.config.OpenApiConfig;
 import com.openapi.firma.dto.*;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Profile;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.*;
+import org.springframework.http.converter.StringHttpMessageConverter;
 import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -18,7 +21,27 @@ import java.util.List;
 @Component
 @Profile("!mock")
 public class OpenApiFirmaClient {
+    @Bean
+    public RestTemplate restTemplate() {
+        RestTemplate restTemplate = new RestTemplate();
 
+        // Rimuovi i converter di default
+        restTemplate.getMessageConverters().clear();
+
+        // Aggiungi StringHttpMessageConverter senza charset
+        StringHttpMessageConverter stringConverter = new StringHttpMessageConverter(StandardCharsets.UTF_8);
+        stringConverter.setWriteAcceptCharset(false);
+
+        // Supporta solo application/json senza charset
+        List<MediaType> supportedMediaTypes = new ArrayList<>();
+        supportedMediaTypes.add(MediaType.APPLICATION_JSON);
+        stringConverter.setSupportedMediaTypes(supportedMediaTypes);
+
+        restTemplate.getMessageConverters().add(stringConverter);
+        restTemplate.getMessageConverters().add(new MappingJackson2HttpMessageConverter());
+
+        return restTemplate;
+    }
     private final RestTemplate restTemplate;
     private final OpenApiConfig config;
     private final ObjectMapper objectMapper;
@@ -52,8 +75,7 @@ public class OpenApiFirmaClient {
     private HttpHeaders createAuthHeaders() {
         HttpHeaders headers = new HttpHeaders();
         // Set content type with UTF-8 charset explicitly
-        headers.setContentType(new MediaType("application", "json", java.nio.charset.StandardCharsets.UTF_8));
-
+        headers.set("Content-Type", "application/json");
         // OpenAPI uses Bearer token authentication
         headers.set("Authorization", "Bearer " + config.getApiKey());
 
@@ -67,7 +89,27 @@ public class OpenApiFirmaClient {
      */
     public ApiResponse<FirmaResponse> createFirmaRequest(FirmaRequest request) {
         log.info("Creating firma request for document: {}", request.getFilename());
+        request.getMembers().get(0).getSigns().get(0).setPosition("10,15,45,35");
+        // Log content length to verify it's not truncated
+        int contentLength = request.getContent() != null ? request.getContent().length() : 0;
+        log.info("Request content (base64) length: {} characters", contentLength);
+        if (request.getTitle() == null) request.setTitle("");
+        if (request.getDescription() == null) request.setDescription("");
+        if (request.getUi() == null) request.setUi("");
 
+        // Validazione pre-invio
+        if (request.getContent() == null || request.getContent().isEmpty()) {
+            log.error("Content is null or empty!");
+        }
+        if (request.getMembers() == null || request.getMembers().isEmpty()) {
+            log.error("Members list is null or empty!");
+        }
+        // Verifica che ogni member abbia signs
+        for (FirmaRequest.Member member : request.getMembers()) {
+            if (member.getSigns() == null || member.getSigns().isEmpty()) {
+                log.error("Member {} has no signs!", member.getEmail());
+            }
+        }
         HttpHeaders headers = createAuthHeaders();
 
         String url = config.getActiveBaseUrl() + "/firma_elettronica/base";
@@ -76,8 +118,23 @@ public class OpenApiFirmaClient {
         try {
             // Serialize to JSON string first
             requestJson = objectMapper.writeValueAsString(request);
-            log.info("POST {} with body: {}", url, requestJson);
+
+            // Log only the size and structure, not the full content
+            log.info("POST {} - JSON size: {} bytes", url, requestJson.length());
             log.info("Request headers: {}", headers);
+            System.out.println("LENGTH JSON: " + requestJson.length());
+            // Verify the content field in the JSON
+            int contentStartIdx = requestJson.indexOf("\"content\":\"");
+            if (contentStartIdx != -1) {
+                int contentEndIdx = requestJson.indexOf("\"", contentStartIdx + 11);
+                if (contentEndIdx != -1) {
+                    int jsonContentLength = contentEndIdx - (contentStartIdx + 11);
+                    log.info("Content field in JSON: {} characters", jsonContentLength);
+                    if (jsonContentLength != contentLength) {
+                        log.error("CONTENT TRUNCATION DETECTED! Original: {}, In JSON: {}", contentLength, jsonContentLength);
+                    }
+                }
+            }
 
             // Send JSON as a String to ensure proper serialization
             HttpEntity<String> entity = new HttpEntity<>(requestJson, headers);

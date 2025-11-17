@@ -4,7 +4,10 @@
 spring:
   application:
     name: firma-backend-mock
-
+  servlet:
+    multipart:
+      max-file-size: 150MB
+      max-request-size: 150MB
 logging:
   level:
     com.openapi.firma.client.MockOpenApiFirmaClient: DEBUG

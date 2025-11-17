@@ -149,7 +149,7 @@ sequenceDiagram
     participant Client as OpenAPI Client
     participant OpenAPI as OpenAPI Firma API
 
-    User->>UI: Compila form<br/>- Titolo<br/>- PDF file<br/>- Firmatari
+    User->>UI: Compila form<br/>- PDF file<br/>- Dati firmatario<br/>- Posizione firma
     User->>UI: Click "Crea Richiesta"
 
     UI->>UI: Valida form localmente
@@ -162,7 +162,7 @@ sequenceDiagram
 
     Store->>API: POST /api/firma
     activate API
-    Note right of API: FirmaRequest {<br/>  title, description,<br/>  filename, content (Base64),<br/>  members: [{<br/>    firstname, lastname,<br/>    email, phone,<br/>    signs: [{page, position}]<br/>  }]<br/>}
+    Note right of API: FirmaRequest {<br/>  filename: "firma_${timestamp}.pdf",<br/>  content (Base64),<br/>  members: [{<br/>    firstname, lastname,<br/>    email, phone,<br/>    signs: [{page, position?}]<br/>  }]<br/>}<br/><br/>Note: title e description<br/>sono stati rimossi
 
     API->>Controller: createSignatureRequest()
     activate Controller
@@ -203,24 +203,45 @@ sequenceDiagram
 **Frontend Request**:
 ```typescript
 interface FirmaRequest {
-  title?: string;
-  description?: string;
-  filename: string;
-  content: string; // Base64 PDF
-  members: Member[];
+  // title e description rimossi - non più usati
+  filename: string; // Autogenerato: "firma_${Date.now()}.pdf"
+  content: string; // Base64 PDF completo
+  members: Member[]; // SEMPRE array con 1 solo elemento
 }
 
 interface Member {
   firstname: string;
   lastname: string;
   email: string;
-  phone: string; // +393331234567
-  signs: SignPosition[];
+  phone: string; // Formato: +393331234567
+  signs: SignPosition[]; // SEMPRE array con 1 solo elemento
 }
 
 interface SignPosition {
-  page: number; // starts at 1
-  position?: string; // "x1,y1,x2,y2"
+  page: number; // Inizia da 1
+  position?: string; // Opzionale, formato: "x1,y1,x2,y2"
+}
+```
+
+**Esempio Request Reale**:
+```json
+{
+  "filename": "firma_1737025680123.pdf",
+  "content": "JVBERi0xLjQKJeLjz9MK...",
+  "members": [
+    {
+      "firstname": "Mario",
+      "lastname": "Rossi",
+      "email": "mario.rossi@example.com",
+      "phone": "+393331234567",
+      "signs": [
+        {
+          "page": 1,
+          "position": "10,15,45,35"
+        }
+      ]
+    }
+  ]
 }
 ```
 
@@ -229,17 +250,16 @@ interface SignPosition {
 {
   "data": {
     "id": "uuid-123-456",
-    "filename": "contratto.pdf",
-    "title": "Contratto di lavoro",
+    "filename": "firma_1737025680123.pdf",
     "status": "created",
     "members": [
       {
         "firstname": "Mario",
         "lastname": "Rossi",
-        "email": "mario@example.com",
+        "email": "mario.rossi@example.com",
         "phone": "+393331234567",
         "status": "pending",
-        "signLink": "https://firma.openapi.com/sign/xxx",
+        "signLink": "https://firma.openapi.com/sign/xxx-yyy-zzz",
         "createdAt": "2025-01-15T10:00:00",
         "updatedAt": "2025-01-15T10:00:00"
       }
@@ -249,6 +269,12 @@ interface SignPosition {
   "message": "Richiesta creata con successo"
 }
 ```
+
+**Note importanti**:
+- `title` e `description` non sono più presenti nella response
+- `filename` è sempre autogenerato con timestamp
+- `members` contiene sempre un solo elemento
+- Ogni member ha una sola posizione firma in `signs`
 
 ---
 
@@ -734,6 +760,85 @@ public class GlobalExceptionHandler {
 | GET | `/firma_elettronica/{id}` | Dettagli richiesta |
 | GET | `/firma_elettronica/{id}/download` | Scarica PDF firmato |
 | GET | `/firma_elettronica/{id}/audit` | Audit trail |
+
+---
+
+## Debug e Troubleshooting
+
+### Verifica Integrità Base64
+
+Il backend include logging per verificare che il contenuto base64 del PDF non venga troncato:
+
+**File**: `OpenApiFirmaClient.java`
+
+```java
+public ApiResponse<FirmaResponse> createFirmaRequest(FirmaRequest request) {
+    // Log lunghezza originale del content
+    int contentLength = request.getContent() != null ? request.getContent().length() : 0;
+    log.info("Request content (base64) length: {} characters", contentLength);
+
+    // Serializza in JSON
+    requestJson = objectMapper.writeValueAsString(request);
+    log.info("POST {} - JSON size: {} bytes", url, requestJson.length());
+
+    // Verifica che il content nel JSON non sia troncato
+    int contentStartIdx = requestJson.indexOf("\"content\":\"");
+    if (contentStartIdx != -1) {
+        int contentEndIdx = requestJson.indexOf("\"", contentStartIdx + 11);
+        if (contentEndIdx != -1) {
+            int jsonContentLength = contentEndIdx - (contentStartIdx + 11);
+            log.info("Content field in JSON: {} characters", jsonContentLength);
+            if (jsonContentLength != contentLength) {
+                log.error("CONTENT TRUNCATION DETECTED! Original: {}, In JSON: {}",
+                         contentLength, jsonContentLength);
+            }
+        }
+    }
+}
+```
+
+**Log di esempio** (funzionamento corretto):
+```
+Request content (base64) length: 125640 characters
+POST https://test.ws.firmadigitale.com/firma_elettronica/base - JSON size: 125890 bytes
+Content field in JSON: 125640 characters
+```
+
+**Log di esempio** (troncamento rilevato):
+```
+Request content (base64) length: 125640 characters
+POST https://test.ws.firmadigitale.com/firma_elettronica/base - JSON size: 100000 bytes
+Content field in JSON: 99750 characters
+ERROR: CONTENT TRUNCATION DETECTED! Original: 125640, In JSON: 99750
+```
+
+### Conversione Base64 Frontend
+
+La conversione PDF → Base64 avviene tramite FileReader API:
+
+**File**: `frontend/src/services/api.ts`
+
+```typescript
+fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.readAsDataURL(file);
+    reader.onload = () => {
+      const result = reader.result as string;
+      // Rimuove prefisso "data:application/pdf;base64,"
+      const base64 = result.split(',')[1];
+      resolve(base64);
+    };
+    reader.onerror = (error) => reject(error);
+  });
+}
+```
+
+**Caratteristiche**:
+- ✅ Legge l'intero file (NO troncamento)
+- ✅ Rimuove correttamente il prefisso data URL
+- ✅ Restituisce base64 pulito
+- ⚠️ Nessun limite di dimensione file (può causare problemi con PDF molto grandi)
 
 ---
 
